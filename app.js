@@ -26,6 +26,18 @@ const APP_VERSION = "v0.3 mini";
 const SERVICE_WORKER_VERSION = "v20260504";
 const SERVICE_WORKER_CACHE_NAME = `nyan-note-static-${SERVICE_WORKER_VERSION}`;
 const AUTH_DEBUG_ENABLED = typeof window !== "undefined" && new URLSearchParams(window.location.search).get("authDebug") === "1";
+const IS_CAPACITOR = typeof window !== "undefined" && Boolean(window.Capacitor);
+
+function isCapacitorNativePlatform() {
+  if (!IS_CAPACITOR) return false;
+  try {
+    if (typeof window.Capacitor.isNativePlatform === "function") return window.Capacitor.isNativePlatform();
+    const platform = typeof window.Capacitor.getPlatform === "function" ? window.Capacitor.getPlatform() : "";
+    return platform === "android" || platform === "ios";
+  } catch (_e) {
+    return false;
+  }
+}
 
 function safeLocalStorageGet(key) {
   try {
@@ -788,6 +800,10 @@ function CatHealthApp() {
     lastAuthResult: "未実行",
     lastAuthErrorCode: "",
     lastAuthErrorMessage: "",
+    redirectResultChecked: "false",
+    redirectResultSuccess: "",
+    redirectResultErrorCode: "",
+    redirectResultErrorMessage: "",
     popupFlowStep: "idle",
     popupStartedAt: "",
     popupFinishedAt: "",
@@ -1050,132 +1066,42 @@ function CatHealthApp() {
       setMessage("Googleログインを利用できません。時間をおいて再度お試しください。");
       return;
     }
-    const popupStartedAt = new Date().toISOString();
+
+    const provider = new window.firebase.auth.GoogleAuthProvider();
+    const isNativeCapacitor = isCapacitorNativePlatform();
     setIsGoogleLoginInProgress(true);
-    let authAction = "signInWithPopup";
-    setFirebaseDebug((prev) => ({
-      ...prev,
-      popupFlowStep: "prepare",
-      popupStartedAt,
-      popupFinishedAt: "",
-      popupSucceeded: "",
-      popupCaughtError: "",
-      popupErrorCode: "",
-      popupErrorMessage: "",
-      popupResultUserUid: "",
-      popupResultProviderIds: "",
-      popupResultEmail: "",
-      popupProviderId: "",
-      popupProviderScopes: "",
-      popupExpectedHandlerUrl: "",
-      popupAuthDomain: "",
-      popupErrorCustomData: "",
-      popupErrorCredentialProviderId: "",
-      lastAuthErrorCode: "",
-      lastAuthErrorMessage: "",
-    }));
+
     try {
-      const provider = new window.firebase.auth.GoogleAuthProvider();
       const currentUser = firestoreGateway.auth.currentUser;
-      const previousAnonymousUid = currentUser?.isAnonymous ? currentUser.uid || "" : "";
-      const popupAuthDomain = firestoreGateway.auth?.app?.options?.authDomain || "";
-      const popupExpectedHandlerUrl = popupAuthDomain ? `https://${popupAuthDomain}/__/auth/handler` : "";
-      setFirebaseDebug((prev) => ({
-        ...prev,
-        popupProviderId: provider.providerId || "",
-        popupProviderScopes: (typeof provider.getScopes === "function" ? provider.getScopes() : []).join(","),
-        popupAuthDomain,
-        popupExpectedHandlerUrl,
-        previousAnonymousUid,
-      }));
-      const providerIds = Array.isArray(currentUser?.providerData)
-        ? currentUser.providerData.map((p) => p?.providerId).filter(Boolean)
-        : [];
+      const providerIds = Array.isArray(currentUser?.providerData) ? currentUser.providerData.map((p) => p?.providerId).filter(Boolean) : [];
       const shouldLinkAnonymous = Boolean(currentUser?.uid && currentUser?.isAnonymous && !providerIds.includes("google.com"));
-      authAction = shouldLinkAnonymous ? "linkWithPopup" : "signInWithPopup";
-      setFirebaseDebug((prev) => ({ ...prev, lastAuthAction: authAction, popupFlowStep: `${authAction}:before` }));
-      const result = shouldLinkAnonymous ? await currentUser.linkWithPopup(provider) : await firestoreGateway.auth.signInWithPopup(provider);
-      const popupFinishedAt = new Date().toISOString();
-      setFirebaseDebug((prev) => ({
-        ...prev,
-        popupFlowStep: `${authAction}:success`,
-        popupFinishedAt,
-        popupSucceeded: "true",
-        popupCaughtError: "false",
-        popupResultUserUid: result?.user?.uid || "",
-        popupResultProviderIds: (result?.user?.providerData || []).map((p) => p?.providerId).filter(Boolean).join(","),
-        popupResultEmail: result?.user?.email || "",
-        lastAuthResult: "success",
-        lastAuthErrorCode: "",
-        lastAuthErrorMessage: "",
-      }));
-      setFirebaseDebug((prev) => ({ ...prev, popupFlowStep: `${authAction}:reload` }));
-      if (firestoreGateway.auth.currentUser) {
-        await firestoreGateway.auth.currentUser.reload();
+      let authAction = shouldLinkAnonymous ? "linkWithPopup" : "signInWithPopup";
+      setFirebaseDebug((prev) => ({ ...prev, lastAuthAction: authAction, lastAuthResult: "in-progress", popupFlowStep: `${authAction}:before`, lastAuthErrorCode: "", lastAuthErrorMessage: "" }));
+
+      let result;
+      try {
+        result = shouldLinkAnonymous ? await currentUser.linkWithPopup(provider) : await firestoreGateway.auth.signInWithPopup(provider);
+      } catch (popupError) {
+        if (!isNativeCapacitor) throw popupError;
+        authAction = "signInWithRedirect";
+        setFirebaseDebug((prev) => ({ ...prev, lastAuthAction: authAction, popupFlowStep: `${authAction}:before` }));
+        await firestoreGateway.auth.signInWithRedirect(provider);
+        setFirebaseDebug((prev) => ({ ...prev, lastAuthResult: "redirect-started", popupFlowStep: `${authAction}:started` }));
+        setMessage("Googleログインへ遷移しました。アカウント選択後にアプリへ戻ります。");
+        return;
       }
-      const refreshedUser = firestoreGateway.auth.currentUser;
-      const refreshedProviderIds = Array.isArray(refreshedUser?.providerData)
-        ? refreshedUser.providerData.map((p) => p?.providerId).filter(Boolean)
-        : [];
-      const isGoogleLinked = refreshedProviderIds.includes("google.com");
-      setAuthUserInfo({
-        status: isGoogleLinked ? "Googleログイン済み" : "匿名ログイン中",
-        isGoogleLinked,
-        userLabel: refreshedUser?.displayName || refreshedUser?.email || "",
-      });
-      setFirebaseDebug((prev) => ({
-        ...prev,
-        authStatus: isGoogleLinked ? "Googleログイン済み" : "匿名ログイン中",
-        popupFlowStep: `${authAction}:post-check`,
-        popupResultUserUid: refreshedUser?.uid || prev.popupResultUserUid,
-        popupResultProviderIds: refreshedProviderIds.join(","),
-        popupResultEmail: refreshedUser?.email || prev.popupResultEmail,
-      }));
+
+      const signedInUser = result?.user || firestoreGateway.auth.currentUser;
+      const signedInProviderIds = Array.isArray(signedInUser?.providerData) ? signedInUser.providerData.map((p) => p?.providerId).filter(Boolean) : [];
+      const isGoogleLinked = signedInProviderIds.includes("google.com");
+      setAuthUserInfo({ status: isGoogleLinked ? "Googleログイン済み" : "匿名ログイン中", isGoogleLinked, userLabel: signedInUser?.displayName || signedInUser?.email || "" });
+      setFirebaseDebug((prev) => ({ ...prev, authStatus: isGoogleLinked ? "Googleログイン済み" : "匿名ログイン中", lastAuthAction: authAction, lastAuthResult: "success", lastAuthErrorCode: "", lastAuthErrorMessage: "", popupFlowStep: `${authAction}:success` }));
       setMessage(isGoogleLinked ? "Googleログインが完了しました。" : "Googleログイン後の状態確認が必要です。再度お試しください。");
     } catch (e) {
       const details = getFirebaseErrorDetails(e);
-      const popupFinishedAt = new Date().toISOString();
-      const errorCustomData = e && typeof e === "object" && e.customData ? JSON.stringify(e.customData) : "";
-      const errorCredentialProviderId = e && typeof e === "object" && e.credential?.providerId ? e.credential.providerId : "";
-      setFirebaseDebug((prev) => ({
-        ...prev,
-        popupFlowStep: `${authAction}:catch`,
-        popupFinishedAt,
-        popupSucceeded: "false",
-        popupCaughtError: "true",
-        popupErrorCode: details.code,
-        popupErrorMessage: details.message,
-        popupErrorCustomData: errorCustomData,
-        popupErrorCredentialProviderId: errorCredentialProviderId,
-        lastAuthResult: "error",
-        lastAuthErrorCode: details.code || "auth/unknown",
-        lastAuthErrorMessage: details.message || "不明な認証エラー",
-      }));
-      if (details.code === "auth/popup-closed-by-user") {
-        setMessage("Googleログインをユーザーが閉じました（auth/popup-closed-by-user）");
-        return;
-      }
-      if (details.code === "auth/cancelled-popup-request") {
-        setMessage("Googleログイン要求がキャンセルされました（auth/cancelled-popup-request）");
-        return;
-      }
-      if (details.code === "auth/popup-blocked") {
-        setMessage("ポップアップがブロックされました（auth/popup-blocked）");
-        return;
-      }
-      if (details.code === "auth/credential-already-in-use") {
-        setMessage("このGoogleアカウントは既に別UIDで利用中です。既存Googleユーザーとして継続するか、この端末データはローカルのまま利用してください。");
-        setPendingMigrationNotice("移行未実施: 既存Googleアカウントと匿名UIDの自動統合は行っていません。");
-        return;
-      }
-      setMessage("Googleログインに失敗しました。時間をおいてもう一度お試しください");
+      setFirebaseDebug((prev) => ({ ...prev, popupFlowStep: "auth-exception", popupCaughtError: "true", popupErrorCode: details.code, popupErrorMessage: details.message, lastAuthResult: "error", lastAuthErrorCode: details.code || "auth/unknown", lastAuthErrorMessage: details.message || "不明な認証エラー" }));
+      setMessage(`Googleログインに失敗しました: ${details.code} ${details.message}`);
     } finally {
-      const popupFinishedAt = new Date().toISOString();
-      setFirebaseDebug((prev) => ({
-        ...prev,
-        popupFlowStep: `${authAction}:finally`,
-        popupFinishedAt: prev.popupFinishedAt || popupFinishedAt,
-      }));
       setIsGoogleLoginInProgress(false);
     }
   }, [firestoreGateway, isGoogleLoginInProgress]);
@@ -1748,6 +1674,36 @@ function CatHealthApp() {
       }
       try {
         await firestoreGateway.auth.setPersistence(window.firebase.auth.Auth.Persistence.LOCAL);
+        if (isCapacitorNativePlatform()) {
+          try {
+            setFirebaseDebug((prev) => ({ ...prev, lastAuthAction: "getRedirectResult", redirectResultChecked: "true" }));
+            const redirectResult = await firestoreGateway.auth.getRedirectResult();
+            if (redirectResult && redirectResult.user) {
+              setFirebaseDebug((prev) => ({
+                ...prev,
+                lastAuthResult: "redirect-success",
+                redirectResultSuccess: "true",
+                redirectResultErrorCode: "",
+                redirectResultErrorMessage: "",
+              }));
+              setMessage("Googleログイン（リダイレクト）から復帰しました。");
+            } else {
+              setFirebaseDebug((prev) => ({ ...prev, lastAuthResult: "redirect-empty", redirectResultSuccess: "false" }));
+            }
+          } catch (redirectError) {
+            const redirectDetails = getFirebaseErrorDetails(redirectError);
+            setFirebaseDebug((prev) => ({
+              ...prev,
+              lastAuthResult: "redirect-error",
+              redirectResultSuccess: "false",
+              redirectResultErrorCode: redirectDetails.code,
+              redirectResultErrorMessage: redirectDetails.message,
+              lastAuthErrorCode: redirectDetails.code,
+              lastAuthErrorMessage: redirectDetails.message,
+            }));
+            setMessage(`Googleログイン復帰時エラー: ${redirectDetails.code} ${redirectDetails.message}`);
+          }
+        }
         await new Promise((resolve) => {
           const unsub = firestoreGateway.auth.onAuthStateChanged(async (user) => {
             try {
@@ -2168,11 +2124,22 @@ function CatHealthApp() {
         {AUTH_DEBUG_ENABLED && (
           <div style={{ ...cardStyle, background: "#F4F7FF", fontSize: 11, whiteSpace: "pre-wrap" }}>
             {[
+              `isCapacitor: ${String(isCapacitorNativePlatform())}`,
+              `location.href: ${typeof window !== "undefined" ? window.location.href : ""}`,
+              `location.origin: ${typeof window !== "undefined" ? window.location.origin : ""}`,
+              `location.protocol: ${typeof window !== "undefined" ? window.location.protocol : ""}`,
+              `userAgent: ${typeof navigator !== "undefined" ? navigator.userAgent : ""}`,
               `authDomain: ${firestoreGateway.auth?.app?.options?.authDomain || ""}`,
               `projectId: ${firestoreGateway.auth?.app?.options?.projectId || ""}`,
               `authUid: ${authOwnerUid || ""}`,
               `isAnonymous: ${String(Boolean(firestoreGateway.auth?.currentUser?.isAnonymous))}`,
               `providerIds: ${(firestoreGateway.auth?.currentUser?.providerData || []).map((p) => p?.providerId).filter(Boolean).join(",")}`,
+              `redirectResultChecked: ${firebaseDebug.redirectResultChecked || "false"}`,
+              `redirectResultSuccess: ${firebaseDebug.redirectResultSuccess || ""}`,
+              `redirectResultErrorCode: ${firebaseDebug.redirectResultErrorCode || ""}`,
+              `redirectResultErrorMessage: ${firebaseDebug.redirectResultErrorMessage || ""}`,
+              `currentUserUid: ${firestoreGateway.auth?.currentUser?.uid || ""}`,
+              `currentUserEmail: ${firestoreGateway.auth?.currentUser?.email || ""}`,
               `email: ${firestoreGateway.auth?.currentUser?.email || ""}`,
               `lastAuthAction: ${firebaseDebug.lastAuthAction || ""}`,
               `lastAuthResult: ${firebaseDebug.lastAuthResult || ""}`,
